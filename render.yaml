@@ -1,0 +1,30 @@
+# Backend only. Database is Supabase; frontend is Vercel.
+services:
+  - type: web
+    name: im-telligence-schedule-api
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m alembic upgrade head && python -m app.cli bootstrap --non-interactive && uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1 --proxy-headers
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.15
+      - key: APP_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: FRONTEND_URL
+        sync: false
+      - key: TIMEZONE
+        value: Asia/Beirut
+      - key: SESSION_HOURS
+        value: "8"
+      - key: BOOTSTRAP_EMAIL
+        sync: false
+      - key: BOOTSTRAP_NAME
+        sync: false
+      - key: BOOTSTRAP_PASSWORD
+        sync: false
