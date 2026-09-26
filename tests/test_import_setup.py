@@ -1,4 +1,4 @@
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 
 from app.models import AuditLog, School, Teacher, TeacherSchoolAssignment
 
@@ -126,3 +126,44 @@ def test_creation_can_be_disabled_and_ambiguous_or_inactive_records_are_rejected
     assert "More than one teacher" in duplicate["errors"][0]["message"]
     inactive = upload(client, "Horizon,Rami,1,A,Monday,08:00,08:45,\n").json()
     assert "must be active" in inactive["errors"][0]["message"]
+
+
+def test_preview_uses_only_reads_and_query_count_does_not_grow_per_row(clients, store):
+    engine = store.kw["bind"]
+    statements = []
+
+    def record(connection, cursor, statement, parameters, context, executemany):
+        statements.append(statement.split()[0].upper())
+
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        query_counts = []
+        for count in (1, 200):
+            statements.clear()
+            rows = "".join(
+                f"New School,Teacher Grade {i},1,Class {i},Monday,08:00,08:45,\n" for i in range(count)
+            )
+            result = upload(clients["SUPER_ADMIN"], rows).json()
+            assert result["valid_rows"] == count and not result["errors"]
+            assert statements and set(statements) == {"SELECT"}
+            query_counts.append(len(statements))
+        assert query_counts[0] == query_counts[1]
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+
+
+def test_preview_and_import_report_same_conflicts_for_existing_and_new_classes(clients):
+    client = clients["SUPER_ADMIN"]
+    first = upload(client, "Cedar,Huda,Grade 4,B,Monday,08:00,08:45,\n", dry=False).json()
+    assert first["imported"] == 1
+    rows = (
+        "Cedar,Huda,Grade 4,B,Monday,08:30,09:15,\n"
+        "New School,New Teacher,1,New Class,Tuesday,10:00,10:45,\n"
+        "New School,New Teacher,1,New Class,Tuesday,10:30,11:15,\n"
+    )
+    preview = upload(client, rows).json()
+    assert len(preview["conflicts"]) == 2 and not preview["errors"]
+    assert len(client.get("/api/schedules").json()) == 1
+    imported = upload(client, rows, dry=False).json()
+    assert imported["imported"] == 3 and len(imported["conflicts"]) == 2
+    assert sorted(x["types"] for x in preview["conflicts"]) == sorted(x["types"] for x in imported["conflicts"])

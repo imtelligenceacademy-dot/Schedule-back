@@ -24,8 +24,8 @@ For production migration validation, deploy to a Supabase **test** project first
 
 | Check | Result |
 |---|---|
-| API suite on disposable SQLite | 31 passed |
-| Same API suite on isolated PostgreSQL 17.11 schemas | 31 passed |
+| API suite on disposable SQLite | 33 passed |
+| Same API suite on isolated PostgreSQL 17.11 schemas | 33 passed |
 | Browser suite in Microsoft Edge, separate frontend/API origins | 5 passed |
 | TypeScript strict checks and Vite production build | Passed |
 | Ruff checks | Passed |
@@ -35,5 +35,7 @@ For production migration validation, deploy to a Supabase **test** project first
 | Native PostgreSQL dump and restore into a separate test database | Passed |
 
 The import tests cover automatic setup by Super Admins, preview rollback, atomic failure rollback, audit records, existing assignments, one-school-per-year enforcement, duplicate teacher names, inactive records and Admin permission boundaries. The browser suite checks the creation option and preview before importing into a new school. The complete 77-lesson user workbook also passed an import into an empty disposable database: 3 schools, 27 teachers, 27 assignments and 73 classes were created.
+
+Validation performs no database writes and its query count stays constant as the file grows. Regression tests compare 1-row and 200-row previews and verify preview/import conflict results agree. On local PostgreSQL with 100 ms of simulated latency per SQL statement, the 77-lesson workbook used 8 read statements for validation (0.84 seconds) and 15 statements for importing, including 6 batched inserts (1.57 seconds). These are controlled test timings, not measured production latency.
 
 PostgreSQL validation used a local isolated test server, which was shut down afterward. The deployment walkthrough remains the hosted acceptance check for actual Supabase credentials, routing and project policies. The API suite emits one dependency deprecation warning from Starlette's current `httpx` test-client integration; it does not affect the passing application tests.

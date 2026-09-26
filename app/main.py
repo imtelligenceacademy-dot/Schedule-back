@@ -2,7 +2,6 @@ from datetime import datetime, timedelta
 from io import BytesIO, StringIO
 from pathlib import Path
 import csv
-import hashlib
 import zipfile
 from zoneinfo import ZoneInfo
 
@@ -10,7 +9,6 @@ from fastapi import APIRouter, Depends, FastAPI, File, HTTPException, Query, Req
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from openpyxl import Workbook, load_workbook
-from pydantic import ValidationError
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError, OperationalError, TimeoutError as PoolTimeoutError
 from sqlalchemy.orm import Session
@@ -18,6 +16,7 @@ from sqlalchemy.orm.exc import StaleDataError
 
 from .config import get_settings
 from .database import get_db
+from .imports import import_rows
 from .models import (
     AcademicYear,
     AuditLog,
@@ -701,161 +700,7 @@ def import_schedule(
         raise HTTPException(
             422, "Required columns: school, teacher, grade, class, day, start_time, end_time. notes is optional."
         )
-    errors, imported_ids, count = [], [], 0
-    new_records = {"schools": [], "teachers": [], "assignments": [], "classes": 0}
-    can_create = create_missing and user.role == "SUPER_ADMIN"
-
-    def missing(message):
-        if user.role == "SUPER_ADMIN":
-            raise ValueError(message + " Enable creation of missing records or add this record first.")
-        raise ValueError(message + " Ask a Super Admin to create and assign the missing records.")
-
-    schools = {x.name.casefold(): x for x in db.scalars(select(School))}
-    teachers = {}
-    for teacher in db.scalars(select(Teacher)):
-        teachers.setdefault(teacher.full_name.casefold(), []).append(teacher)
-    for line, values in enumerate(raw[1:], 2):
-        if not any(x is not None and str(x).strip() for x in values):
-            continue
-        row = {
-            name: (str(values[i]).strip() if i < len(values) and values[i] is not None else "")
-            for i, name in enumerate(headers)
-        }
-        try:
-            # Validate the complete row before staging any new reference records.
-            palette = ["#315FAA", "#288478", "#AC5A33", "#8D5CA6", "#AD8430", "#52738A"]
-            color_index = int(hashlib.sha256(row["school"].casefold().encode()).hexdigest()[:8], 16)
-            school_data = SchoolInput(name=row["school"], color=palette[color_index % len(palette)])
-            teacher_data = TeacherInput(full_name=row["teacher"])
-            class_data = ClassInput(school_id=1, grade=row["grade"], name=row["class"])
-            day = next(
-                (
-                    i
-                    for i, value in enumerate(DAYS)
-                    if row["day"].casefold() in {value.casefold(), value[:3].casefold()}
-                ),
-                None,
-            )
-            if day is None:
-                raise ValueError("Use a weekday name such as Monday.")
-            # Excel time cells stringify as HH:MM:SS; canonicalize only valid zero-second times.
-            for key in ("start_time", "end_time"):
-                if len(row[key]) == 8 and row[key].endswith(":00"):
-                    row[key] = row[key][:5]
-            data = SessionInput(
-                school_id=1,
-                teacher_id=1,
-                class_id=1,
-                academic_year_id=academic_year_id,
-                day=day,
-                start_time=row["start_time"],
-                end_time=row["end_time"],
-                notes=row.get("notes", ""),
-            )
-            school = schools.get(school_data.name.casefold())
-            if not school:
-                if not can_create:
-                    missing(f"School '{school_data.name}' was not found.")
-                school = School(**school_data.model_dump())
-                db.add(school)
-                audit(db, user, "create", school)
-                schools[school.name.casefold()] = school
-                new_records["schools"].append(school.name)
-            candidates = teachers.get(teacher_data.full_name.casefold(), [])
-            if len(candidates) > 1:
-                raise ValueError(f"More than one teacher is named '{teacher_data.full_name}'. Use a unique teacher name.")
-            if not candidates:
-                if not can_create:
-                    missing(f"Teacher '{teacher_data.full_name}' was not found.")
-                teacher = Teacher(**teacher_data.model_dump())
-                db.add(teacher)
-                audit(db, user, "create", teacher)
-                teachers[teacher.full_name.casefold()] = [teacher]
-                new_records["teachers"].append(teacher.full_name)
-            else:
-                teacher = candidates[0]
-            if not school.active or not teacher.active:
-                raise ValueError("School and teacher must be active.")
-            assignment = db.scalar(
-                select(TeacherSchoolAssignment).where(
-                    TeacherSchoolAssignment.teacher_id == teacher.id,
-                    TeacherSchoolAssignment.academic_year_id == academic_year_id,
-                )
-            )
-            if assignment and assignment.school_id != school.id:
-                assigned_school = db.get(School, assignment.school_id)
-                raise ValueError(
-                    f"Teacher '{teacher.full_name}' is already assigned to '{assigned_school.name}' for this year. "
-                    "One teacher can only belong to one school per academic year."
-                )
-            if not assignment:
-                if not can_create:
-                    missing(f"Teacher '{teacher.full_name}' is not assigned to '{school.name}' for this year.")
-                assignment = TeacherSchoolAssignment(
-                    teacher_id=teacher.id, school_id=school.id, academic_year_id=academic_year_id
-                )
-                db.add(assignment)
-                audit(db, user, "create", assignment)
-                new_records["assignments"].append({"teacher": teacher.full_name, "school": school.name})
-            school_class = db.scalar(
-                select(SchoolClass).where(
-                    SchoolClass.school_id == school.id,
-                    SchoolClass.grade == class_data.grade,
-                    SchoolClass.name == class_data.name,
-                )
-            )
-            if not school_class:
-                class_data.school_id = school.id
-                school_class = SchoolClass(**class_data.model_dump())
-                db.add(school_class)
-                audit(db, user, "create", school_class)
-                new_records["classes"] += 1
-            data.school_id = school.id
-            data.teacher_id = teacher.id
-            data.class_id = school_class.id
-            duplicate = db.scalar(
-                select(ScheduleEntry.id).where(
-                    ScheduleEntry.academic_year_id == academic_year_id,
-                    ScheduleEntry.class_id == data.class_id,
-                    ScheduleEntry.teacher_id == data.teacher_id,
-                    ScheduleEntry.day == data.day,
-                    ScheduleEntry.start_time == data.start_time,
-                    ScheduleEntry.end_time == data.end_time,
-                )
-            )
-            if duplicate:
-                raise ValueError("This session is already present or duplicated within the file.")
-            entry = ScheduleEntry(**data.model_dump(), created_by=user.id, updated_by=user.id)
-            db.add(entry)
-            audit(db, user, "import", entry)
-            imported_ids.append(entry.id)
-            count += 1
-        except (ValueError, ValidationError, HTTPException) as exc:
-            message = exc.detail if isinstance(exc, HTTPException) else str(exc)
-            errors.append({"row": line, "message": message})
-    warnings = (
-        [
-            x
-            for x in conflicts(sessions(db, academic_year_id=academic_year_id))
-            if x["first"]["id"] in imported_ids or x["second"]["id"] in imported_ids
-        ]
-        if not errors
-        else []
-    )
-    if errors or dry_run:
-        db.rollback()
-    else:
-        if not count:
-            raise HTTPException(422, "No schedule rows found.")
-        commit(db)
-    return {
-        "dry_run": dry_run,
-        "valid_rows": count,
-        "errors": errors,
-        "conflicts": warnings,
-        "imported": count if not dry_run and not errors else 0,
-        "new_records": new_records if not errors else {"schools": [], "teachers": [], "assignments": [], "classes": 0},
-    }
+    return import_rows(db, user, academic_year_id, raw, headers, create_missing=create_missing, dry_run=dry_run)
 
 
 app.include_router(api)
