@@ -174,6 +174,8 @@ On a fresh migrated database it creates the Super Admin from the bootstrap varia
 4. In **Schools**, add schools with colors and classes.
 5. In **Teachers**, add teachers and assign each to one school for the selected year.
 6. In **All Schedules**, add sessions; or use **Data Import** to download the template, validate and import a CSV/Excel file.
+
+Super Admin imports can create missing schools, teachers, classes and teacher-school assignments for the selected year. The **Create missing schools, teachers and yearly assignments** option is enabled by default. Validation previews the new records without saving anything; clicking Import saves the setup and sessions in one transaction. Invalid rows roll back all records. Existing teacher names must identify one teacher, inactive records are rejected, and a teacher already assigned to another school cannot be reassigned by import. Admins can import sessions and new classes but must use schools, teachers and assignments already configured by a Super Admin.
 7. In **Users**, create separate Admin/Viewer accounts; do not share the Super Admin login. New users must replace their temporary password on first login.
 
 To create the first admin interactively from your machine instead, configure `backend/.env` for the target database and run `python -m app.cli bootstrap`. The password prompt is hidden. Do not use `--demo` in production.

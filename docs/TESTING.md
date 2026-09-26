@@ -24,8 +24,8 @@ For production migration validation, deploy to a Supabase **test** project first
 
 | Check | Result |
 |---|---|
-| API suite on disposable SQLite | 25 passed |
-| Same API suite on isolated PostgreSQL 17.11 schemas | 25 passed |
+| API suite on disposable SQLite | 31 passed |
+| Same API suite on isolated PostgreSQL 17.11 schemas | 31 passed |
 | Browser suite in Microsoft Edge, separate frontend/API origins | 5 passed |
 | TypeScript strict checks and Vite production build | Passed |
 | Ruff checks | Passed |
@@ -34,4 +34,6 @@ For production migration validation, deploy to a Supabase **test** project first
 | PostgreSQL RLS and denial of `anon`/`authenticated` reads | Passed |
 | Native PostgreSQL dump and restore into a separate test database | Passed |
 
-PostgreSQL validation used a local isolated test server, which was shut down afterward. The production Vercel, Render and Supabase accounts have not been provisioned or deployed in this workspace. The deployment walkthrough remains the final hosted acceptance check. The API suite emits one dependency deprecation warning from Starlette's current `httpx` test-client integration; it does not affect the passing application tests.
+The import tests cover automatic setup by Super Admins, preview rollback, atomic failure rollback, audit records, existing assignments, one-school-per-year enforcement, duplicate teacher names, inactive records and Admin permission boundaries. The browser suite checks the creation option and preview before importing into a new school. The complete 77-lesson user workbook also passed an import into an empty disposable database: 3 schools, 27 teachers, 27 assignments and 73 classes were created.
+
+PostgreSQL validation used a local isolated test server, which was shut down afterward. The deployment walkthrough remains the hosted acceptance check for actual Supabase credentials, routing and project policies. The API suite emits one dependency deprecation warning from Starlette's current `httpx` test-client integration; it does not affect the passing application tests.

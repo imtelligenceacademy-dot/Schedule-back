@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 from io import BytesIO, StringIO
 from pathlib import Path
 import csv
+import hashlib
 import zipfile
 from zoneinfo import ZoneInfo
 
@@ -655,6 +656,7 @@ def import_template(user: User = Depends(editor)):
 def import_schedule(
     academic_year_id: int,
     dry_run: bool = True,
+    create_missing: bool = True,
     file: UploadFile = File(...),
     user: User = Depends(editor),
     db: Session = Depends(get_db),
@@ -700,6 +702,14 @@ def import_schedule(
             422, "Required columns: school, teacher, grade, class, day, start_time, end_time. notes is optional."
         )
     errors, imported_ids, count = [], [], 0
+    new_records = {"schools": [], "teachers": [], "assignments": [], "classes": 0}
+    can_create = create_missing and user.role == "SUPER_ADMIN"
+
+    def missing(message):
+        if user.role == "SUPER_ADMIN":
+            raise ValueError(message + " Enable creation of missing records or add this record first.")
+        raise ValueError(message + " Ask a Super Admin to create and assign the missing records.")
+
     schools = {x.name.casefold(): x for x in db.scalars(select(School))}
     teachers = {}
     for teacher in db.scalars(select(Teacher)):
@@ -712,11 +722,12 @@ def import_schedule(
             for i, name in enumerate(headers)
         }
         try:
-            school = schools.get(row["school"].casefold())
-            candidates = teachers.get(row["teacher"].casefold(), [])
-            if not school or len(candidates) != 1:
-                raise ValueError("School/teacher must already exist and teacher name must be unique.")
-            teacher = candidates[0]
+            # Validate the complete row before staging any new reference records.
+            palette = ["#315FAA", "#288478", "#AC5A33", "#8D5CA6", "#AD8430", "#52738A"]
+            color_index = int(hashlib.sha256(row["school"].casefold().encode()).hexdigest()[:8], 16)
+            school_data = SchoolInput(name=row["school"], color=palette[color_index % len(palette)])
+            teacher_data = TeacherInput(full_name=row["teacher"])
+            class_data = ClassInput(school_id=1, grade=row["grade"], name=row["class"])
             day = next(
                 (
                     i
@@ -731,38 +742,76 @@ def import_schedule(
             for key in ("start_time", "end_time"):
                 if len(row[key]) == 8 and row[key].endswith(":00"):
                     row[key] = row[key][:5]
-            school_class = db.scalar(
-                select(SchoolClass).where(
-                    SchoolClass.school_id == school.id,
-                    SchoolClass.grade == row["grade"],
-                    SchoolClass.name == row["class"],
-                )
-            )
             data = SessionInput(
-                school_id=school.id,
-                teacher_id=teacher.id,
-                class_id=school_class.id if school_class else 1,
+                school_id=1,
+                teacher_id=1,
+                class_id=1,
                 academic_year_id=academic_year_id,
                 day=day,
                 start_time=row["start_time"],
                 end_time=row["end_time"],
                 notes=row.get("notes", ""),
             )
+            school = schools.get(school_data.name.casefold())
+            if not school:
+                if not can_create:
+                    missing(f"School '{school_data.name}' was not found.")
+                school = School(**school_data.model_dump())
+                db.add(school)
+                audit(db, user, "create", school)
+                schools[school.name.casefold()] = school
+                new_records["schools"].append(school.name)
+            candidates = teachers.get(teacher_data.full_name.casefold(), [])
+            if len(candidates) > 1:
+                raise ValueError(f"More than one teacher is named '{teacher_data.full_name}'. Use a unique teacher name.")
+            if not candidates:
+                if not can_create:
+                    missing(f"Teacher '{teacher_data.full_name}' was not found.")
+                teacher = Teacher(**teacher_data.model_dump())
+                db.add(teacher)
+                audit(db, user, "create", teacher)
+                teachers[teacher.full_name.casefold()] = [teacher]
+                new_records["teachers"].append(teacher.full_name)
+            else:
+                teacher = candidates[0]
+            if not school.active or not teacher.active:
+                raise ValueError("School and teacher must be active.")
             assignment = db.scalar(
                 select(TeacherSchoolAssignment).where(
                     TeacherSchoolAssignment.teacher_id == teacher.id,
                     TeacherSchoolAssignment.academic_year_id == academic_year_id,
                 )
             )
-            if not assignment or assignment.school_id != school.id:
-                raise ValueError("Teacher is not assigned to this school for this year.")
-            if not school.active or not teacher.active:
-                raise ValueError("School and teacher must be active.")
+            if assignment and assignment.school_id != school.id:
+                assigned_school = db.get(School, assignment.school_id)
+                raise ValueError(
+                    f"Teacher '{teacher.full_name}' is already assigned to '{assigned_school.name}' for this year. "
+                    "One teacher can only belong to one school per academic year."
+                )
+            if not assignment:
+                if not can_create:
+                    missing(f"Teacher '{teacher.full_name}' is not assigned to '{school.name}' for this year.")
+                assignment = TeacherSchoolAssignment(
+                    teacher_id=teacher.id, school_id=school.id, academic_year_id=academic_year_id
+                )
+                db.add(assignment)
+                audit(db, user, "create", assignment)
+                new_records["assignments"].append({"teacher": teacher.full_name, "school": school.name})
+            school_class = db.scalar(
+                select(SchoolClass).where(
+                    SchoolClass.school_id == school.id,
+                    SchoolClass.grade == class_data.grade,
+                    SchoolClass.name == class_data.name,
+                )
+            )
             if not school_class:
-                class_data = ClassInput(school_id=school.id, grade=row["grade"], name=row["class"])
+                class_data.school_id = school.id
                 school_class = SchoolClass(**class_data.model_dump())
                 db.add(school_class)
                 audit(db, user, "create", school_class)
+                new_records["classes"] += 1
+            data.school_id = school.id
+            data.teacher_id = teacher.id
             data.class_id = school_class.id
             duplicate = db.scalar(
                 select(ScheduleEntry.id).where(
@@ -805,6 +854,7 @@ def import_schedule(
         "errors": errors,
         "conflicts": warnings,
         "imported": count if not dry_run and not errors else 0,
+        "new_records": new_records if not errors else {"schools": [], "teachers": [], "assignments": [], "classes": 0},
     }
 
 
