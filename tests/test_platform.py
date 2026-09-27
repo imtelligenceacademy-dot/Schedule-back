@@ -178,6 +178,12 @@ def test_filter_queries_and_export(clients, payload):
     for query in ["teacher_id=1", "day=0", "grade=Grade%204", "class_id=1", "search=Huda"]:
         assert len(admin.get("/api/schedules?" + query).json()) == 1
     assert admin.get("/api/schedules?search=%25").json() == []
+    # Repeated values match any of them, e.g. comparing two teachers.
+    for query in ["teacher_id=1&teacher_id=2", "day=0&day=1", "grade=Grade%204&grade=Grade%205"]:
+        assert len(admin.get("/api/schedules?" + query).json()) == 2
+    assert len(admin.get("/api/schedules?teacher_id=1&teacher_id=2&day=1").json()) == 1
+    assert admin.get("/api/schedules?day=0&day=7").status_code == 422
+    assert admin.get("/api/export?format=csv&teacher_id=1&teacher_id=2").text.count("\n") == 3
     data = admin.get("/api/export?format=csv&teacher_id=1")
     assert data.status_code == 200
     assert "'=HYPERLINK" in data.text

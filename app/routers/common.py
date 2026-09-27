@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from ..config import get_settings
 from ..security import current_user
@@ -30,13 +30,16 @@ def set_session_cookie(response: Response, token: str):
 
 def filters(
     academic_year_id: int | None = None,
-    school_id: int | None = None,
-    teacher_id: int | None = None,
-    day: int | None = Query(None, ge=0, le=6),
-    grade: str | None = None,
-    class_id: int | None = None,
+    # Each list filter accepts repeated values (?teacher_id=1&teacher_id=2) and matches any of them.
+    school_id: list[int] | None = Query(None, max_length=100),
+    teacher_id: list[int] | None = Query(None, max_length=100),
+    day: list[int] | None = Query(None, max_length=7),
+    grade: list[str] | None = Query(None, max_length=100),
+    class_id: list[int] | None = Query(None, max_length=200),
     search: str | None = Query(None, max_length=150),
 ):
+    if day and any(not 0 <= x <= 6 for x in day):
+        raise HTTPException(422, "Days must be between 0 (Monday) and 6 (Sunday).")
     return dict(
         academic_year_id=academic_year_id,
         school_id=school_id,

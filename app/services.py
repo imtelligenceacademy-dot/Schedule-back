@@ -103,7 +103,11 @@ def session_query(
         (SchoolClass.grade, grade),
         (ScheduleEntry.class_id, class_id),
     ]:
-        if value is not None and value != "":
+        if isinstance(value, list):
+            values = [x for x in value if x != ""]
+            if values:
+                q = q.where(field.in_(values))
+        elif value is not None and value != "":
             q = q.where(field == value)
     if search:
         escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
