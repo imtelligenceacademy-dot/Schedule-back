@@ -1,5 +1,5 @@
 from fastapi import Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from ..database import get_db
@@ -54,6 +54,63 @@ def edit_school(school_id: int, data: SchoolInput, user: User = Depends(super_ad
     audit(db, user, "update", row, old)
     commit(db)
     return snapshot(row)
+
+
+LINKED = {
+    # Order matters: sessions reference assignments and classes, so they are removed first.
+    "school_id": [("sessions", ScheduleEntry), ("assignments", TeacherSchoolAssignment), ("classes", SchoolClass)],
+    "teacher_id": [("sessions", ScheduleEntry), ("assignments", TeacherSchoolAssignment)],
+}
+
+
+def linked_records(db, field, value):
+    """Records that deleting a school or teacher would remove."""
+    return {key: db.scalars(select(model).where(getattr(model, field) == value)).all() for key, model in LINKED[field]}
+
+
+def impact(db, linked):
+    archived = {x.id for x in db.scalars(select(AcademicYear).where(AcademicYear.archived))}
+    return {
+        **{key: len(rows) for key, rows in linked.items()},
+        "archived_sessions": sum(x.academic_year_id in archived for x in linked["sessions"]),
+    }
+
+
+def delete_with_links(db, user, row, field):
+    linked = linked_records(db, field, row.id)
+    # The audit entry keeps a copy of everything removed, so it can be restored by hand.
+    audit(
+        db, user, "delete", row, {**snapshot(row), "removed": {k: [snapshot(x) for x in v] for k, v in linked.items()}}
+    )
+    for key, model in LINKED[field]:
+        ids = [x.id for x in linked[key]]
+        if ids:
+            db.execute(delete(model).where(model.id.in_(ids)))
+    db.delete(row)
+    commit(db)
+    return {key: len(rows) for key, rows in linked.items()}
+
+
+@router.get("/schools/{school_id}/impact")
+def school_delete_impact(school_id: int, user: User = Depends(super_admin), db: Session = Depends(get_db)):
+    return impact(db, linked_records(db, "school_id", find(db, School, school_id).id))
+
+
+@router.delete("/schools/{school_id}")
+def delete_school(school_id: int, user: User = Depends(super_admin), db: Session = Depends(get_db)):
+    school = find(db, School, school_id)
+    return {"message": "School deleted.", "removed": delete_with_links(db, user, school, "school_id")}
+
+
+@router.get("/teachers/{teacher_id}/impact")
+def teacher_delete_impact(teacher_id: int, user: User = Depends(super_admin), db: Session = Depends(get_db)):
+    return impact(db, linked_records(db, "teacher_id", find(db, Teacher, teacher_id).id))
+
+
+@router.delete("/teachers/{teacher_id}")
+def delete_teacher(teacher_id: int, user: User = Depends(super_admin), db: Session = Depends(get_db)):
+    teacher = find(db, Teacher, teacher_id)
+    return {"message": "Teacher deleted.", "removed": delete_with_links(db, user, teacher, "teacher_id")}
 
 
 @router.post("/teachers", status_code=201)

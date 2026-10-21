@@ -85,11 +85,16 @@ def validate_session(db, data):
         )
 
 
+def user_label(full_name, deleted_at):
+    """Name shown in history; deleted accounts keep their name with a marker."""
+    return f"{full_name} (deleted)" if deleted_at else full_name
+
+
 def session_query(
     academic_year_id=None, school_id=None, teacher_id=None, day=None, grade=None, class_id=None, search=None
 ):
     q = (
-        select(ScheduleEntry, School, Teacher, SchoolClass, User.full_name)
+        select(ScheduleEntry, School, Teacher, SchoolClass, User.full_name, User.deleted_at)
         .join(School, ScheduleEntry.school_id == School.id)
         .join(Teacher, ScheduleEntry.teacher_id == Teacher.id)
         .join(SchoolClass, ScheduleEntry.class_id == SchoolClass.id)
@@ -124,7 +129,7 @@ def session_query(
 
 def sessions(db, **filters):
     result = []
-    for entry, school, teacher, school_class, updated_by_name in db.execute(session_query(**filters)):
+    for entry, school, teacher, school_class, updated_by, deleted_at in db.execute(session_query(**filters)):
         result.append(
             {
                 **snapshot(entry),
@@ -133,7 +138,7 @@ def sessions(db, **filters):
                 "teacher_name": teacher.full_name,
                 "grade": school_class.grade,
                 "class_name": school_class.name,
-                "updated_by_name": updated_by_name,
+                "updated_by_name": user_label(updated_by, deleted_at),
             }
         )
     return result

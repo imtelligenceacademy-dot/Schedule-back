@@ -295,6 +295,89 @@ def test_disable_user_and_export_permission(clients):
     assert admin.put("/api/users/1", json={**data, "role": "SUPER_ADMIN", "active": False}).status_code == 409
 
 
+def test_delete_school_removes_linked_records(clients, store, payload):
+    admin = clients["SUPER_ADMIN"]
+    create(clients["ADMIN"], payload)
+    create(clients["ADMIN"], {**payload, "teacher_id": 2, "class_id": 2})
+    assert clients["ADMIN"].delete("/api/schools/1").status_code == 403
+    assert clients["ADMIN"].get("/api/schools/1/impact").status_code == 403
+    assert admin.get("/api/schools/1/impact").json() == {
+        "sessions": 2,
+        "assignments": 2,
+        "classes": 2,
+        "archived_sessions": 0,
+    }
+    response = admin.delete("/api/schools/1")
+    assert response.status_code == 200, response.text
+    assert response.json()["removed"] == {"sessions": 2, "assignments": 2, "classes": 2}
+    catalog = admin.get("/api/catalog").json()
+    assert [x["id"] for x in catalog["schools"]] == [2]
+    assert [x["school_id"] for x in catalog["classes"]] == [2]
+    assert [x["school_id"] for x in catalog["assignments"]] == [2]
+    assert [x["id"] for x in catalog["teachers"]] == [1, 2]  # teachers themselves are kept
+    assert admin.get("/api/schedules").json() == []
+    assert admin.delete("/api/schools/1").status_code == 404
+    with store() as db:
+        log = db.scalar(select(AuditLog).where(AuditLog.entity_type == "schools", AuditLog.action == "delete"))
+        assert log.old_value["name"] == "Cedar"
+        assert len(log.old_value["removed"]["sessions"]) == 2
+
+
+def test_delete_teacher_removes_sessions_and_assignments_in_every_year(clients, payload):
+    admin = clients["SUPER_ADMIN"]
+    create(clients["ADMIN"], payload)
+    create(clients["ADMIN"], {**payload, "teacher_id": 2, "class_id": 2})
+    create(clients["ADMIN"], {**payload, "academic_year_id": 2, "school_id": 2, "class_id": 3})
+    assert admin.put("/api/years/2", json={"archived": True}).status_code == 200
+    assert admin.get("/api/teachers/1/impact").json() == {"sessions": 2, "assignments": 2, "archived_sessions": 1}
+    assert admin.delete("/api/teachers/1").status_code == 200
+    remaining = admin.get("/api/schedules").json()
+    assert [x["teacher_id"] for x in remaining] == [2]
+    catalog = admin.get("/api/catalog").json()
+    assert [x["id"] for x in catalog["teachers"]] == [2]
+    assert {x["teacher_id"] for x in catalog["assignments"]} == {2}
+    assert len(catalog["classes"]) == 3  # classes belong to schools, not teachers
+
+
+def test_delete_user_keeps_history_and_frees_email(clients, store, payload):
+    admin = clients["SUPER_ADMIN"]
+    entry = create(clients["ADMIN"], payload)
+    assert admin.delete("/api/users/1").status_code == 409  # not yourself
+    assert clients["ADMIN"].delete("/api/users/3").status_code == 403
+    assert admin.delete("/api/users/2").status_code == 200
+    assert clients["ADMIN"].get("/api/schedules").status_code == 401  # existing session revoked
+    with TestClient(app) as client:
+        login = client.post("/api/auth/login", json={"email": "admin@example.com", "password": PASSWORD})
+        assert login.status_code == 401
+    assert [x["id"] for x in admin.get("/api/users").json()] == [1, 3]
+    assert (
+        admin.put(
+            "/api/users/2", json={"full_name": "x", "role": "ADMIN", "active": True, "export_allowed": False}
+        ).status_code
+        == 404
+    )
+    assert admin.delete("/api/users/2").status_code == 404
+    session = admin.get(f"/api/schedules/{entry['id']}").json()
+    assert session["updated_by_name"] == "Admin (deleted)"
+    names = {x["user_name"] for x in admin.get("/api/audit").json()["items"]}
+    assert "Admin (deleted)" in names
+    recreated = admin.post(
+        "/api/users",
+        json={
+            "full_name": "Admin Again",
+            "email": "admin@example.com",
+            "role": "ADMIN",
+            "temporary_password": "Temporary-pass-2026",
+        },
+    )
+    assert recreated.status_code == 201
+    with store() as db:
+        deleted = db.get(User, 2)
+        assert deleted.deleted_at is not None and not deleted.active
+        assert deleted.email == "deleted-2@deleted.invalid"
+        assert not verify_password(PASSWORD, deleted.password_hash)
+
+
 def test_logout_revokes_bearer(clients):
     admin = clients["ADMIN"]
     assert admin.post("/api/auth/logout").status_code == 200

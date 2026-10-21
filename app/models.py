@@ -32,6 +32,8 @@ class User(Base):
     token_version: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     last_login: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Deleted accounts stay as rows so audit history and "last updated by" keep their name.
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     __table_args__ = (CheckConstraint("role IN ('SUPER_ADMIN','ADMIN','VIEWER')", name="ck_user_role"),)
 
 
